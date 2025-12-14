@@ -6,6 +6,9 @@ from fpdf import FPDF
 from deepseek_client import DeepSeekClient, TranslationClient
 import platform
 from config import Config
+import cv2
+import numpy as np
+from PIL import Image
 
 class PDFProcessor:
     def __init__(self):
@@ -13,6 +16,89 @@ class PDFProcessor:
         self.translator = TranslationClient()  # Siempre disponible
         self.temp_dir = tempfile.mkdtemp()
         self.poppler_path = self._find_poppler_aggressive()
+    
+    def enhance_image_for_ocr(self, image_path):
+        """Mejora la calidad de la imagen para OCR siguiendo las mejores prácticas
+        
+        Aplica:
+        1. Eliminación de ruido
+        2. Enderezamiento (deskew)
+        3. Binarización (alto contraste B/N)
+        4. Escalado moderado para texto pequeño
+        """
+        try:
+            # Leer imagen
+            img = cv2.imread(image_path)
+            if img is None:
+                print(f"[WARN] No se pudo leer imagen para preprocesar: {image_path}")
+                return image_path
+            
+            print(f"[INFO] Preprocesando imagen: {os.path.basename(image_path)}")
+            
+            # 1. Convertir a escala de grises
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # 2. Eliminación de ruido con fastNlMeansDenoising
+            print("  - Eliminando ruido...")
+            denoised = cv2.fastNlMeansDenoising(gray, None, h=10, templateWindowSize=7, searchWindowSize=21)
+            
+            # 3. Enderezamiento (deskew) usando transformada de Hough
+            print("  - Enderezando página...")
+            coords = np.column_stack(np.where(denoised > 0))
+            if len(coords) > 0:
+                angle = cv2.minAreaRect(coords)[-1]
+                if angle < -45:
+                    angle = -(90 + angle)
+                else:
+                    angle = -angle
+                
+                # Solo corregir si el ángulo es significativo (> 0.5 grados)
+                if abs(angle) > 0.5:
+                    print(f"    Ángulo detectado: {angle:.2f}°")
+                    (h, w) = denoised.shape[:2]
+                    center = (w // 2, h // 2)
+                    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                    denoised = cv2.warpAffine(denoised, M, (w, h), 
+                                             flags=cv2.INTER_CUBIC, 
+                                             borderMode=cv2.BORDER_REPLICATE)
+            
+            # 4. Binarización adaptativa (mejor que threshold simple para iluminación irregular)
+            print("  - Aplicando binarización...")
+            binary = cv2.adaptiveThreshold(
+                denoised, 255, 
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 
+                11, 2
+            )
+            
+            # 5. Escalado moderado para mejorar texto pequeño
+            if Config.IMAGE_SCALE_FACTOR > 1.0:
+                print(f"  - Escalando imagen {Config.IMAGE_SCALE_FACTOR}x...")
+                new_width = int(binary.shape[1] * Config.IMAGE_SCALE_FACTOR)
+                new_height = int(binary.shape[0] * Config.IMAGE_SCALE_FACTOR)
+                binary = cv2.resize(binary, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+            
+            # Guardar imagen mejorada
+            enhanced_path = image_path.replace('.png', '_enhanced.png')
+            cv2.imwrite(enhanced_path, binary)
+            
+            # Verificar tamaño del archivo
+            file_size = os.path.getsize(enhanced_path)
+            print(f"  ✓ Imagen preprocesada: {file_size/1024/1024:.2f}MB")
+            
+            # Si es muy grande, reducir calidad
+            if file_size > 25 * 1024 * 1024:  # 25MB
+                print(f"  - Reduciendo tamaño de archivo...")
+                # Convertir a PIL para comprimir mejor
+                pil_img = Image.fromarray(binary)
+                pil_img.save(enhanced_path, "PNG", optimize=True, compress_level=9)
+            
+            return enhanced_path
+            
+        except Exception as e:
+            print(f"[ERROR] Error en preprocesamiento: {str(e)}")
+            print(f"  Usando imagen original sin preprocesar")
+            return image_path
     
     def _find_poppler_aggressive(self):
         """Búsqueda agresiva de poppler en el proyecto"""
@@ -41,19 +127,23 @@ class PDFProcessor:
         return None
 
     def extract_images_from_pdf(self, pdf_path, progress_callback=None):
-        """Extrae imágenes de cada página del PDF"""
+        """Extrae imágenes de cada página del PDF con alta resolución"""
         if progress_callback:
             progress_callback("extracting", 0, 1, "Extrayendo imágenes del PDF...")
+        
+        # Usar DPI más alto para mejor calidad OCR
+        dpi = Config.IMAGE_DPI  # 300 DPI por defecto
+        print(f"[INFO] Extrayendo imágenes a {dpi} DPI...")
         
         try:
             if self.poppler_path:
                 images = convert_from_path(
                     pdf_path, 
-                    dpi=200, 
+                    dpi=dpi, 
                     poppler_path=self.poppler_path
                 )
             else:
-                images = convert_from_path(pdf_path, dpi=200)
+                images = convert_from_path(pdf_path, dpi=dpi)
                 
         except Exception as e:
             error_msg = f"Error al convertir PDF a imágenes: {str(e)}"
@@ -76,6 +166,10 @@ class PDFProcessor:
             if file_size > 25 * 1024 * 1024:  # 25MB
                 print(f"[DEBUG] Página {i+1} muy grande ({file_size/1024/1024:.1f}MB), reduciendo calidad...")
                 image.save(image_path, "PNG", optimize=True, quality=85)
+            
+            # Aplicar preprocesamiento para mejorar calidad OCR
+            if Config.ENHANCE_IMAGE_QUALITY:
+                image_path = self.enhance_image_for_ocr(image_path)
             
             image_paths.append(image_path)
             

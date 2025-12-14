@@ -1,4 +1,4 @@
-tkinter
+# tkinter viene incluido con Python, no es necesario instalarlo
 PyPDF2
 pdf2image
 pillow
@@ -6,3 +6,6 @@ requests
 fpdf
 python-dotenv
 pymupdf
+openai>=1.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0

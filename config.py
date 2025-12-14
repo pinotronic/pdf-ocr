@@ -17,9 +17,19 @@ class Config:
     # - deepseek-r1:8b (alternativa con visión)
     # - deepseek-ocr:latest (específico pero puede necesitar prompt especial)
     
-    # Configuración para traducción
+    # Configuración para traducción con OpenAI
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # Modelo rápido y económico
+    USE_OPENAI_TRANSLATION = os.getenv("USE_OPENAI_TRANSLATION", "true").lower() == "true"
+    
+    # Configuración para traducción local (fallback)
     TRANSLATION_MODEL = os.getenv("TRANSLATION_MODEL", "llama3.2:latest")
     AUTO_TRANSLATE = os.getenv("AUTO_TRANSLATE", "false").lower() == "true"
+    
+    # Configuración de preprocesamiento de imágenes
+    IMAGE_DPI = 300  # Alta resolución para mejor OCR (antes 200)
+    ENHANCE_IMAGE_QUALITY = os.getenv("ENHANCE_IMAGE_QUALITY", "true").lower() == "true"
+    IMAGE_SCALE_FACTOR = float(os.getenv("IMAGE_SCALE_FACTOR", "1.5"))  # Escalar 1.5x para texto pequeño
     
     # Configuración general
     SUPPORTED_FORMATS = ['.pdf', '.PDF']

@@ -44,15 +44,29 @@ class DeepSeekClient:
             with open(image_path, "rb") as image_file:
                 base64_image = base64.b64encode(image_file.read()).decode('utf-8')
             
-            # Prompt simple y efectivo (probado por el usuario - funciona!)
-            prompt = "extrae el texto de la imagen"
+            # Prompt mejorado para máxima extracción de texto
+            prompt = """Extrae TODO el texto visible en esta imagen con máxima precisión. 
+Instrucciones:
+- Lee TODO el texto, incluyendo encabezados, párrafos, números, fechas y notas al pie
+- Mantén el formato original y la estructura de párrafos
+- No omitas nada, incluso texto pequeño o parcialmente visible
+- Incluye TODOS los números, precios, fechas y referencias
+- Si hay tablas, intenta mantener su estructura
+- Devuelve el texto completo sin resumen ni comentarios adicionales
+
+Texto:"""
             
-            # Payload para Ollama (configuración probada y funcional)
+            # Payload para Ollama (configuración optimizada para OCR)
             payload = {
                 "model": self.ollama_model,
                 "prompt": prompt,
                 "images": [base64_image],
-                "stream": False
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,  # Baja temperatura para respuestas más precisas
+                    "num_ctx": 8192,     # Contexto extendido para documentos largos
+                    "num_predict": 4096  # Más tokens de salida para textos largos
+                }
             }
             
             print(f"[DEBUG] Enviando imagen a {self.ollama_model}... (tiempo estimado: 2 minutos)")
@@ -105,6 +119,22 @@ class DeepSeekClient:
                 "Content-Type": "application/json"
             }
             
+            # Prompt mejorado siguiendo las mejores prácticas de DeepSeek-OCR
+            # Formato: <image>\n<|grounding|>... para documentos estructurados
+            # o <image>\nFree OCR... para extracción simple de texto
+            ocr_prompt = """<image>
+<|grounding|>Extrae TODO el texto de este documento con máxima precisión y completitud.
+
+Instrucciones:
+- Lee el texto completo: títulos, párrafos, listas, notas al pie, referencias
+- Incluye TODOS los números: fechas, cantidades, precios, teléfonos, referencias
+- Mantén la estructura: usa markdown para tablas si las hay
+- No omitas texto pequeño, notas al margen o texto parcialmente visible
+- Transcribe con precisión absoluta, sin resumir ni parafrasear
+- Si hay elementos no textuales (logos, imágenes), solo extrae el texto
+
+Devuelve el texto completo extraido:"""
+            
             payload = {
                 "model": "deepseek-chat",
                 "messages": [
@@ -112,17 +142,18 @@ class DeepSeekClient:
                         "role": "user",
                         "content": [
                             {
-                                "type": "text", 
-                                "text": "Extrae TODO el texto de esta imagen de manera precisa y completa. Incluye todos los números, fechas, nombres y detalles legales. No omitas nada."
+                                "type": "image_url",
+                                "image_url": f"data:image/png;base64,{base64_image}"
                             },
                             {
-                                "type": "image_url",
-                                "image_url": f"data:image/jpeg;base64,{base64_image}"
+                                "type": "text", 
+                                "text": ocr_prompt
                             }
                         ]
                     }
                 ],
-                "max_tokens": 4000
+                "max_tokens": 8000,      # Aumentado para capturar más texto
+                "temperature": 0.1       # Baja temperatura para precissión
             }
             
             # Aumentar timeout para procesamiento largo
@@ -151,14 +182,91 @@ class DeepSeekClient:
 
 
 class TranslationClient:
-    """Cliente para traducción de textos usando LLM local"""
+    """Cliente para traducción de textos usando OpenAI API (primario) o LLM local (fallback)"""
     
     def __init__(self):
+        # Configuración OpenAI
+        self.use_openai = Config.USE_OPENAI_TRANSLATION
+        self.openai_api_key = Config.OPENAI_API_KEY
+        self.openai_model = Config.OPENAI_MODEL
+        
+        # Configuración Ollama (fallback)
         self.ollama_url = Config.OLLAMA_URL
-        self.model = Config.TRANSLATION_MODEL
+        self.ollama_model = Config.TRANSLATION_MODEL
+        
+        # Verificar configuración
+        if self.use_openai:
+            if not self.openai_api_key:
+                print("[WARN] OpenAI API key no configurada, usando Ollama local como único método")
+                self.use_openai = False
+            else:
+                print(f"[INFO] Traducción: OpenAI {self.openai_model} (primario) + Ollama {self.ollama_model} (fallback)")
+        else:
+            print(f"[INFO] Traducción: Ollama {self.ollama_model} (único método)")
     
     def translate_to_spanish(self, text, page_num=None):
-        """Traduce texto a español, detectando el idioma automáticamente"""
+        """Traduce texto a español usando OpenAI primero, Ollama como fallback"""
+        print(f"[DEBUG TRANSLATOR] translate_to_spanish llamado para página {page_num}")
+        print(f"[DEBUG TRANSLATOR] Longitud del texto: {len(text)} caracteres")
+        
+        if not text or not text.strip():
+            print(f"[DEBUG TRANSLATOR] Texto vacío, retornando sin traducir")
+            return text
+        
+        # Intentar primero con OpenAI si está habilitado
+        if self.use_openai:
+            try:
+                print(f"[INFO] Intentando traducción con OpenAI ({self.openai_model})...")
+                translated = self._translate_with_openai(text, page_num)
+                if translated and translated != text:
+                    print(f"[SUCCESS] Traducción exitosa con OpenAI")
+                    return translated
+                else:
+                    print(f"[WARN] OpenAI no tradujo o devolvió igual, intentando con Ollama...")
+            except Exception as e:
+                print(f"[WARN] Error en OpenAI: {str(e)}, usando Ollama como fallback...")
+        
+        # Fallback a Ollama local
+        print(f"[INFO] Usando Ollama local para traducción...")
+        return self._translate_with_ollama(text, page_num)
+    
+    def _translate_with_openai(self, text, page_num=None):
+        """Traduce usando OpenAI API"""
+        try:
+            import openai
+            
+            if page_num:
+                print(f"[INFO] Traduciendo página {page_num} con OpenAI...")
+            
+            client = openai.OpenAI(api_key=self.openai_api_key)
+            
+            response = client.chat.completions.create(
+                model=self.openai_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Eres un traductor profesional. Traduce el texto al español manteniendo el formato original. Si el texto ya está en español, devuélvelo sin cambios."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Traduce este texto al español:\n\n{text}"
+                    }
+                ],
+                temperature=0.3,
+                max_tokens=4000
+            )
+            
+            translated_text = response.choices[0].message.content.strip()
+            print(f"[DEBUG] OpenAI: Traducción completada ({len(translated_text)} caracteres)")
+            return translated_text
+            
+        except ImportError:
+            raise Exception("Librería 'openai' no instalada. Ejecuta: pip install openai")
+        except Exception as e:
+            raise Exception(f"Error en OpenAI API: {str(e)}")
+    
+    def _translate_with_ollama(self, text, page_num=None):
+        """Traduce usando Ollama local (fallback o método único)"""
         print(f"[DEBUG TRANSLATOR] translate_to_spanish llamado para página {page_num}")
         print(f"[DEBUG TRANSLATOR] Longitud del texto: {len(text)} caracteres")
         try:
@@ -168,20 +276,30 @@ class TranslationClient:
             
             print(f"[DEBUG TRANSLATOR] Enviando texto al LLM para traducción...")
             
-            # Dejar que el LLM detecte el idioma y traduzca si es necesario
-            prompt = f"""Detecta el idioma del siguiente texto. 
-Si está en español, devuélvelo exactamente igual sin cambios.
-Si está en otro idioma, tradúcelo al español.
-Solo responde con el texto (original si es español, o traducido si es otro idioma), sin explicaciones.
+            # Prompt más directo y específico para traducción
+            prompt = f"""Eres un traductor profesional. Tu tarea es TRADUCIR el siguiente texto al español.
 
-Texto:
-{text}"""
+REGLAS IMPORTANTES:
+- Si el texto ya está en español, devuélvelo SIN CAMBIOS
+- Si el texto está en inglés u otro idioma, TRADÚCELO AL ESPAÑOL
+- NO agregues explicaciones, comentarios ni introducciones
+- Solo devuelve el texto traducido o el original si ya está en español
+- Mantén el formato y estructura del texto original
+
+TEXTO A TRADUCIR:
+{text}
+
+TRADUCCIÓN AL ESPAÑOL:"""
             
             if page_num:
                 print(f"[INFO] Traduciendo página {page_num}...")
             
+            print(f"[DEBUG] Modelo usado para traducción: {self.ollama_model}")
+            print(f"[DEBUG] URL Ollama: {self.ollama_url}")
+            print(f"[DEBUG] Primeros 200 caracteres del texto: {text[:200]}...")
+            
             payload = {
-                "model": self.model,
+                "model": self.ollama_model,
                 "prompt": prompt,
                 "stream": False,
                 "options": {
@@ -190,20 +308,29 @@ Texto:
                 }
             }
             
+            print(f"[DEBUG] Enviando request a Ollama...")
             response = requests.post(
                 f"{self.ollama_url}/api/generate",
                 json=payload,
                 timeout=120  # 2 minutos por traducción
             )
             
+            print(f"[DEBUG] Status code de respuesta: {response.status_code}")
+            
             if response.status_code != 200:
                 print(f"[ERROR] Error en traducción: {response.status_code}")
+                print(f"[ERROR] Respuesta: {response.text}")
                 return text  # Devolver original si falla
             
             result = response.json()
             translated_text = result.get('response', '').strip()
             
+            print(f"[DEBUG] Longitud texto original: {len(text)}")
+            print(f"[DEBUG] Longitud texto traducido: {len(translated_text)}")
+            print(f"[DEBUG] Primeros 200 caracteres traducidos: {translated_text[:200]}...")
+            
             if translated_text:
+                print(f"[SUCCESS] Traducción completada exitosamente")
                 return translated_text
             else:
                 print(f"[WARN] Traducción vacía, usando texto original")
