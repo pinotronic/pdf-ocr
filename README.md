@@ -177,4 +177,4 @@ Las contribuciones son bienvenidas. Por favor abre un issue primero para discuti
 
 ## 👨‍💻 Autor
 
-[Tu nombre/contacto]
+Pino Vargas
